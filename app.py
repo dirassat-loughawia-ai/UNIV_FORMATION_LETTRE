@@ -2,6 +2,7 @@ import streamlit as st
 from docx import Document
 import base64
 import re
+import os
 from datetime import datetime
 
 # 1. إعدادات الصفحة
@@ -15,7 +16,7 @@ st.set_page_config(
 # 2. التنسيق البصري للواجهة والاتجاه من اليمين للشمال (RTL)
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap');
     
     html, body, [class*="css"], [data-testid="stMarkdownContainer"] {
         font-family: 'Cairo', sans-serif !important;
@@ -31,21 +32,11 @@ st.markdown("""
         padding: 2rem;
         border-radius: 16px;
         box-shadow: 0 10px 25px -5px rgba(59, 130, 246, 0.3);
-        margin-bottom: 2rem;
+        margin-bottom: 1.5rem;
         text-align: center;
     }
     .hero-header h1 { color: #ffffff !important; font-weight: 700; margin-bottom: 0.5rem; text-align: center !important; }
     .hero-header p { color: #e0f2fe; font-size: 1rem; text-align: center !important; }
-
-    [data-testid="stFileUploader"] {
-        background: #ffffff;
-        border-radius: 14px;
-        padding: 1.5rem;
-        border: 2px dashed #cbd5e1;
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-        direction: rtl !important;
-        text-align: right !important;
-    }
 
     div[data-testid="stExpander"] {
         background: #ffffff;
@@ -130,27 +121,23 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 4. رفع الملف
-uploaded_file = st.file_uploader("📥 قم برفع ملف Word الخاص بالتخصص لتوليد الدليل التفاعلي:", type=["docx"])
-
+# 4. دمج دالتي تنظيف النصوص والأسماء
 def clean_subject_name(raw_name):
-    """تنظيف اسم المادة وحذف تكرار الكلمات الدليلية"""
     name = raw_name.strip()
     name = re.sub(r'^(المادة|مادّة|مادة|المقياس|مقياس|عنوان المادة)\s*[:\-]?\s*', '', name, flags=re.IGNORECASE)
     name = re.sub(r'^(مادّة|مادة)\s+', '', name, flags=re.IGNORECASE)
     return name.strip()
 
 def clean_line_numbers(text):
-    """إزالة الأرقام المبعثرة والترقيمات القديمة في أول أو نهاية السطر"""
     t = text.strip()
     t = re.sub(r'^[\(\[\{]?\d+[\)\]\}]?\s*[\.\-\:]?\s*', '', t)
     t = re.sub(r'\s+[\(\[\{]?\d+[\)\]\}]?\s*$', '', t)
     return t.strip()
 
-def parse_docx_curriculum(file):
-    doc = Document(file)
+# 5. استخراج البيانات من ملف الوورد
+def parse_docx_curriculum(file_source):
+    doc = Document(file_source)
     semesters = {}
-    
     raw_blocks = []
     
     for p in doc.paragraphs:
@@ -183,7 +170,6 @@ def parse_docx_curriculum(file):
     ref_keywords = ["المراجع", "مراجع", "المصادر", "مصادر", "قائمة المراجع", "قائمة المصادر", "المراجع والمصادر", "المصادر والمراجع"]
 
     for text in raw_blocks:
-        # 1. رصد السداسي
         if "السداسي" in text and len(text) < 40:
             sem_m = re.search(r'(السداسي\s+[\u0600-\u06FF]+)', text)
             current_sem = sem_m.group(1) if sem_m else text
@@ -193,14 +179,12 @@ def parse_docx_curriculum(file):
             expecting_subject_after_sem = True
             continue
 
-        # 2. رصد المادة الجديدة
         is_subject_line = any(text.startswith(k) or re.match(r'^(المادة|مادّة|مادة|المقياس|مقياس)\s*[:\-]', text) for k in ["المادة:", "مادّة:", "مادة:", "المقياس:", "مقياس:"])
         
         if current_sem and (is_subject_line or "عنوان المادة" in text or expecting_subject_after_sem):
             if not any(ik in text for ik in ignore_keywords) and len(text) < 120:
                 sub_m = re.search(r'(مادّة|مادة|مقياس|عنوان المادة)\s*[:\-]?\s*([\u0600-\u06FF\s]+?)(?=\s+(المعامل|الرصيد|وحدة|$))', text)
                 extracted_name = sub_m.group(2) if sub_m else text
-
                 clean_name = clean_subject_name(extracted_name)
                 
                 if clean_name and len(clean_name) > 2 and "السداسي" not in clean_name:
@@ -219,7 +203,6 @@ def parse_docx_curriculum(file):
                     if r_m: semesters[current_sem][current_sub]["credits"] = r_m.group(1).strip()
                     continue
 
-        # 3. تصنيف الأسطر إلى محتوى أو مراجع بشكل منفصل
         if current_sem and current_sub and current_sub in semesters[current_sem]:
             cleaned_txt = clean_line_numbers(text)
             if cleaned_txt:
@@ -236,7 +219,7 @@ def parse_docx_curriculum(file):
 
     return semesters
 
-# دالة توليد وثيقة PDF رسمية بتنسيق احترافي
+# 6. توليد كود HTML لمعاينة وطباعة الـ PDF (بمقاس A4)
 def generate_pdf_html(sem_title, sub_title, data):
     today_date = datetime.now().strftime("%Y/%m/%d")
     
@@ -296,14 +279,12 @@ def generate_pdf_html(sem_title, sub_title, data):
                 font-size: 14px;
             }}
 
-            /* حاوية الورقة مع حواشي أمان صريحة */
             .page-container {{
                 box-sizing: border-box;
-                padding: 0.5cm 0; /* حاشية أمان مضافة للداخل */
+                padding: 0.5cm 0;
                 width: 100%;
             }}
 
-            /* الترويسة الرسمية */
             .official-header {{
                 text-align: center;
                 margin-bottom: 20px;
@@ -333,7 +314,6 @@ def generate_pdf_html(sem_title, sub_title, data):
             .header-right {{ text-align: right; }}
             .header-left {{ text-align: left; }}
 
-            /* عنوان المادة والسداسي */
             .doc-title-box {{
                 background-color: #f8fafc;
                 border: 1px solid #cbd5e1;
@@ -345,7 +325,6 @@ def generate_pdf_html(sem_title, sub_title, data):
             .doc-title-box h2 {{ font-size: 13px; color: #475569; margin: 0 0 4px 0; }}
             .doc-title-box h1 {{ font-size: 19px; color: #1e3a8a; margin: 0; font-weight: 800; }}
 
-            /* بطاقة المعلمات */
             .meta-grid {{
                 display: flex;
                 gap: 20px;
@@ -358,7 +337,6 @@ def generate_pdf_html(sem_title, sub_title, data):
             }}
             .meta-item {{ color: #1e293b; }}
 
-            /* الأقسام وتدفق المحتوى */
             .section-block {{
                 break-inside: auto !important;
                 page-break-inside: auto !important;
@@ -375,7 +353,6 @@ def generate_pdf_html(sem_title, sub_title, data):
                 margin-bottom: 14px;
             }}
 
-            /* الترقيم والمقروئية */
             ol.custom-list {{
                 list-style: none;
                 counter-reset: topic-counter;
@@ -416,7 +393,6 @@ def generate_pdf_html(sem_title, sub_title, data):
                 justify-content: center;
             }}
 
-            /* ترقيم المراجع */
             ol.refs-list {{
                 counter-reset: ref-counter !important;
             }}
@@ -487,7 +463,6 @@ def generate_pdf_html(sem_title, sub_title, data):
         <button class="print-btn no-print" onclick="window.print()">🖨️ طباعة أو حفظ الوثيقة (PDF)</button>
         
         <div class="page-container">
-            <!-- الترويسة الرسمية -->
             <div class="official-header">
                 <div class="center-title-1">الجمهورية الجزائرية الديمقراطية الشعبية</div>
                 <div class="center-title-1">وزارة التعليم العالي والبحث العلمي</div>
@@ -505,7 +480,6 @@ def generate_pdf_html(sem_title, sub_title, data):
                 </div>
             </div>
 
-            <!-- عنوان المادة والبيانات -->
             <div class="doc-title-box">
                 <h2>{sem_title}</h2>
                 <h1>المادة: {sub_title}</h1>
@@ -517,7 +491,6 @@ def generate_pdf_html(sem_title, sub_title, data):
                 <div class="meta-item">🎯 الرصيد: {data['credits']}</div>
             </div>
 
-            <!-- مفردات المادة -->
             <div class="section-block">
                 <h3 class="section-header">📘 مفردات برنامج المادة:</h3>
                 <ol class="custom-list">
@@ -525,10 +498,8 @@ def generate_pdf_html(sem_title, sub_title, data):
                 </ol>
             </div>
 
-            <!-- قائمة المراجع -->
             {refs_section_html}
 
-            <!-- التاريخ -->
             <div class="footer-date">
                 📅 حرر بتاريخ: {today_date} م
             </div>
@@ -539,17 +510,39 @@ def generate_pdf_html(sem_title, sub_title, data):
     b64 = base64.b64encode(html_code.encode('utf-8')).decode('utf-8')
     return f"data:text/html;charset=utf-8;base64,{b64}"
 
-# 5. عرض البيانات المنسقة
-if uploaded_file is not None:
-    data = parse_docx_curriculum(uploaded_file)
-    st.success("✨ تم تطبيق هوامش 1.5 سم وتوفير مسافات مريحة للقراءة والطباعة!")
+# 7. قراءة ورصف البيانات حصرياً من الملف الافتراضي المدمج مع شريط بحث ذكي
+DEFAULT_FILE_PATH = "default.docx"
+
+if os.path.exists(DEFAULT_FILE_PATH):
+    data = parse_docx_curriculum(DEFAULT_FILE_PATH)
+
+    # شريط البحث الذكي
+    search_query = st.text_input("🔍 البحث المباشر عن مادة دراسية:", placeholder="اكتب اسم المادة هنا (مثال: لسانيات، نقد، أدب...)...").strip().lower()
+
+    matches_found = 0
 
     for sem_title, subjects in data.items():
-        if not subjects:
+        # تصفية المواد بناءً على نص البحث
+        if search_query:
+            filtered_subjects = {
+                sub_title: sub_data 
+                for sub_title, sub_data in subjects.items() 
+                if search_query in sub_title.lower()
+            }
+        else:
+            filtered_subjects = subjects
+
+        if not filtered_subjects:
             continue
-        with st.expander(f"📌 {sem_title}", expanded=False):
-            for sub_title, sub_data in subjects.items():
-                with st.expander(f"📖 المادة: {sub_title}", expanded=False):
+
+        matches_found += len(filtered_subjects)
+
+        # يفتح السداسي تلقائياً إذا كان الطالب يستخدم خيار البحث
+        is_expanded = bool(search_query)
+
+        with st.expander(f"📌 {sem_title} ({len(filtered_subjects)} مادة)", expanded=is_expanded):
+            for sub_title, sub_data in filtered_subjects.items():
+                with st.expander(f"📖 المادة: {sub_title}", expanded=is_expanded):
                     
                     st.markdown(f"""
                     <div class="info-card">
@@ -567,3 +560,9 @@ if uploaded_file is not None:
                         <a href="{pdf_link}" download="{sub_title}.html" class="btn-print">📥 تحميل الملف / طباعة PDF</a>
                     </div>
                     """, unsafe_allow_html=True)
+
+    if search_query and matches_found == 0:
+        st.info("ℹ️ لم يتم العثور على أي مادة تطابق عبارة البحث. تأكد من كتابة الاسم بالشكل الصحيح.")
+
+else:
+    st.error("❌ لم يتم العثور على ملف البيانات الافتراضي `default.docx` في مجلد التطبيق. يرجى التأكد من رفعه على GitHub.")
